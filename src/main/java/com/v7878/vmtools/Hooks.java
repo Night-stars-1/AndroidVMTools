@@ -1,5 +1,6 @@
 package com.v7878.vmtools;
 
+import static com.v7878.dex.DexConstants.ACC_ABSTRACT;
 import static com.v7878.dex.DexConstants.ACC_CONSTRUCTOR;
 import static com.v7878.dex.DexConstants.ACC_FINAL;
 import static com.v7878.dex.DexConstants.ACC_PRIVATE;
@@ -14,6 +15,8 @@ import static com.v7878.unsafe.Reflection.getDeclaredField;
 import static com.v7878.unsafe.Reflection.getDeclaredMethod;
 import static com.v7878.unsafe.Reflection.unreflect;
 import static com.v7878.vmtools._Utils.rawMethodTypeOf;
+
+import static java.lang.reflect.Modifier.isAbstract;
 
 import com.v7878.dex.DexIO;
 import com.v7878.dex.builder.ClassBuilder;
@@ -58,6 +61,12 @@ public class Hooks {
 
     private static void ensureDeclaringClassInitialized(Executable ex) {
         int flags = ArtMethodUtils.getExecutableFlags(ex);
+        Class<?> clazz = ex.getDeclaringClass();
+
+        // 不检测抽象方法或类
+        if ((flags & ACC_ABSTRACT) != 0 || isAbstract(clazz.getModifiers())) {
+            return;
+        }
         // For static constructor hook, the class CANNOT be initialized
         if ((flags & ACC_CONSTRUCTOR) == 0 || (flags & ACC_STATIC) == 0) {
             ClassUtils.ensureClassVisiblyInitialized(ex.getDeclaringClass());

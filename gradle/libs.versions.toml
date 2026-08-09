@@ -1,5 +1,5 @@
 [versions]
-agp = "9.1.0"
+agp = "9.2.1"
 maven-publish = "0.36.0"
 
 r8-annotations = "v1.0.1"
