@@ -49,10 +49,6 @@ public class Runtime {
         @CallSignature(type = CRITICAL, ret = VOID, args = {LONG_AS_WORD, INT})
         abstract void SetRuntimeDebugState(long runtime, int state);
 
-        @LibrarySymbol(name = "_ZN3art7Runtime19DeoptimizeBootImageEv")
-        @CallSignature(type = CRITICAL, ret = VOID, args = {LONG_AS_WORD})
-        abstract void DeoptimizeBootImage(long runtime);
-
         static final Native INSTANCE = BulkLinker.generateImpl(SCOPE, Native.class, ART);
     }
 
@@ -68,10 +64,6 @@ public class Runtime {
     }
 
     public static void DeoptimizeBootImage() {
-        var instance = Native.INSTANCE;
-        var runtime = JNIUtils.getRuntimePtr();
-        try (var ignored = new ScopedSuspendAll(false)) {
-            instance.DeoptimizeBootImage(runtime);
-        }
+        ArtTransaction.deoptimizeBootImage();
     }
 }

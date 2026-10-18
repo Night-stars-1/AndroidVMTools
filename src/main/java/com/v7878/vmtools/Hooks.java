@@ -7,7 +7,6 @@ import static com.v7878.dex.DexConstants.ACC_PRIVATE;
 import static com.v7878.dex.DexConstants.ACC_PUBLIC;
 import static com.v7878.dex.DexConstants.ACC_STATIC;
 import static com.v7878.dex.builder.CodeBuilder.Op.GET_OBJECT;
-import static com.v7878.unsafe.ArtModifiers.kAccFastInterpreterToInterpreterInvoke;
 import static com.v7878.unsafe.InstructionSet.CURRENT_INSTRUCTION_SET;
 import static com.v7878.unsafe.Reflection.fieldOffset;
 import static com.v7878.unsafe.Reflection.getArtMethod;
@@ -75,13 +74,10 @@ public class Hooks {
 
     public static void deoptimize(Executable ex) {
         ensureDeclaringClassInitialized(ex);
-        try (var ignored = new ScopedSuspendAll(false)) {
-            ArtMethodUtils.makeExecutableNonCompilable(ex);
-            long entry_point = Modifier.isNative(ex.getModifiers()) ?
-                    EntryPoints.getGenericJniTrampoline() :
-                    EntryPoints.getToInterpreterBridge();
-            ArtMethodUtils.setExecutableEntryPoint(ex, entry_point);
-        }
+        long entry_point = Modifier.isNative(ex.getModifiers()) ?
+                EntryPoints.getGenericJniTrampoline() :
+                EntryPoints.getToInterpreterBridge();
+        ArtTransaction.deoptimizePatch(ex, entry_point);
     }
 
     private static byte[] toArray(long value) {
@@ -152,21 +148,30 @@ public class Hooks {
     }
 
     /**
-     * The declaring classes of target and hooker MUST be visible initialized
+     * Builds a trampoline that pushes the ArtMethod of {@code hooker} and jumps to
+     * {@code hooker_entry_point}. The declaring classes of target and hooker MUST be visible
+     * initialized
      */
-    private static void hook(Executable target, Executable hooker, long hooker_entry_point) {
+    private static MemorySegment makeTrampoline(Executable target, Executable hooker,
+                                                long hooker_entry_point) {
         //TODO: check signatures
         Objects.requireNonNull(target);
         Objects.requireNonNull(hooker);
         Arena scope = Arena.ofShared();
         SunCleaner.systemCleaner().register(target.getDeclaringClass(), scope::close);
-        MemorySegment new_entry_point = NativeCodeBlob.makeCodeBlob(scope,
+        return NativeCodeBlob.makeCodeBlob(scope,
                 getTrampolineArray(getArtMethod(hooker), hooker_entry_point))[0];
-        try (var ignored = new ScopedSuspendAll(false)) {
-            ArtMethodUtils.makeExecutableNonCompilable(target);
-            ArtMethodUtils.changeExecutableFlags(target, kAccFastInterpreterToInterpreterInvoke, 0);
-            ArtMethodUtils.setExecutableEntryPoint(target, new_entry_point.nativeAddress());
-        }
+    }
+
+    /**
+     * The declaring classes of target and hooker MUST be visible initialized
+     */
+    private static void hook(Executable target, Executable hooker, long hooker_entry_point) {
+        ArtTransaction.hookPatch(target,
+                makeTrampoline(target, hooker, hooker_entry_point).nativeAddress());
+        // The trampoline keeps a raw ArtMethod pointer of the hooker, so the hooker must stay live
+        // until the patch is committed.
+        Utils.reachabilityFence(hooker);
     }
 
     public enum EntryPointType {
@@ -202,9 +207,14 @@ public class Hooks {
                                 Executable second, EntryPointType second_type) {
         ensureDeclaringClassInitialized(first);
         ensureDeclaringClassInitialized(second);
+        // Every entry point is captured and every trampoline is prepared before the transaction:
+        // both patches are then applied inside one suspend-all window.
         long old_first_entry_point = getEntryPoint(first, first_type);
-        hook(first, second, getEntryPoint(second, second_type));
-        hook(second, first, old_first_entry_point);
+        long old_second_entry_point = getEntryPoint(second, second_type);
+        MemorySegment first_trampoline = makeTrampoline(first, second, old_second_entry_point);
+        MemorySegment second_trampoline = makeTrampoline(second, first, old_first_entry_point);
+        ArtTransaction.hookPatches(first, first_trampoline.nativeAddress(),
+                second, second_trampoline.nativeAddress());
     }
 
     /**
@@ -218,8 +228,17 @@ public class Hooks {
         ensureDeclaringClassInitialized(target);
         ensureDeclaringClassInitialized(hooker);
         ensureDeclaringClassInitialized(backup);
-        hook(backup, target, getEntryPoint(target, target_type));
-        hook(target, hooker, getEntryPoint(hooker, hooker_type));
+        // Every entry point is captured and every trampoline is prepared before the transaction:
+        // the target must never be live while its backup is still unpatched.
+        long old_target_entry_point = getEntryPoint(target, target_type);
+        long old_hooker_entry_point = getEntryPoint(hooker, hooker_type);
+        MemorySegment backup_trampoline = makeTrampoline(backup, target, old_target_entry_point);
+        MemorySegment target_trampoline = makeTrampoline(target, hooker, old_hooker_entry_point);
+        ArtTransaction.hookPatches(backup, backup_trampoline.nativeAddress(),
+                target, target_trampoline.nativeAddress());
+        // "target" and "backup" are fenced by the transaction; the unpatched hooker is only
+        // referenced by the raw ArtMethod pointer inside its trampoline.
+        Utils.reachabilityFence(hooker);
     }
 
     private static final String INVOKER_NAME = Hooks.class.getName() + "$$$Invoker";
